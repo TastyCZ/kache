@@ -224,11 +224,28 @@ fn candidate_roots(
         && compiles_outside_workspace(args, cwd)
     {
         // Only the target directory, possibly nested below `<workspace>/target`,
-        // can name the workspace of such a package.
+        // can name the workspace of such a package. An external target may
+        // sit below an unrelated manifest; its lock must contain this package.
+        let package = manifest_dir.or(cwd).and_then(|dir| {
+            std::fs::read_to_string(dir.join("Cargo.toml"))
+                .ok()?
+                .parse::<toml::Table>()
+                .ok()?
+                .get("package")?
+                .get("name")?
+                .as_str()
+                .map(str::to_owned)
+        });
         if let Some(root) = args.workspace_root().and_then(|parent| {
             parent
                 .ancestors()
                 .find(|dir| dir.join("Cargo.toml").is_file())
+                .filter(|dir| {
+                    package.as_ref().is_some_and(|package| {
+                        crate_names_from_lock(&dir.join("Cargo.lock"))
+                            .is_some_and(|names| names.contains(package))
+                    })
+                })
                 .map(Path::to_path_buf)
         }) {
             roots.push(root);
@@ -702,6 +719,10 @@ mod tests {
     #[test]
     fn a_registry_dependency_without_a_workspace_target_finds_no_workspace() {
         let external = tempfile::tempdir().unwrap();
+        // The nearest manifest is unrelated, even though its target layout
+        // looks like Cargo's default. Do not fall through to host ancestors.
+        std::fs::write(external.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        write_lock(external.path(), &[("unrelated", "9.9.9")]);
         let out_dir = external.path().join("target/debug/deps");
         std::fs::create_dir_all(&out_dir).unwrap();
         let cargo_home = tempfile::tempdir().unwrap();
