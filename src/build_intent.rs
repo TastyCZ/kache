@@ -163,17 +163,20 @@ fn discover_workspace(
     }
 
     // A bare `cargo metadata` would run in that package's directory.
-    if args.is_some_and(compiles_outside_workspace) {
+    if args.is_some_and(|args| compiles_outside_workspace(args, cwd)) {
         return Err(DiscoveryFailure::NoWorkspace);
     }
     run_cargo_metadata(cargo, None, deadline)
 }
 
-/// Cargo passes a workspace member's source relative to the workspace root and
-/// runs any other package (registry, git, outside path) from its own directory
-/// with an absolute source path. Many published crates ship a `Cargo.lock`.
-fn compiles_outside_workspace(args: &RustcArgs) -> bool {
-    args.source_file.as_deref().is_some_and(Path::is_absolute)
+/// Cargo runs registry, git and outside path packages from their own directory,
+/// with an absolute source below it. Their bundled lock is not the build lock.
+/// A workspace package can also name a source outside the workspace; its cwd
+/// still identifies that package and must remain a discovery candidate.
+fn compiles_outside_workspace(args: &RustcArgs, cwd: Option<&Path>) -> bool {
+    args.source_file
+        .as_deref()
+        .is_some_and(|source| source.is_absolute() && cwd.is_none_or(|cwd| source.starts_with(cwd)))
 }
 
 fn crate_names_from_lock(lock_path: &Path) -> Option<Vec<String>> {
@@ -210,7 +213,7 @@ fn candidate_roots(
 ) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(args) = args
-        && compiles_outside_workspace(args)
+        && compiles_outside_workspace(args, cwd)
     {
         // Only the target directory, possibly nested below `<workspace>/target`,
         // can name the workspace of such a package.
@@ -705,6 +708,50 @@ mod tests {
             Some(&package),
         );
         assert_eq!(result.err(), Some(DiscoveryFailure::NoWorkspace));
+    }
+
+    #[test]
+    fn a_workspace_target_with_an_external_source_keeps_its_workspace_lock() {
+        let ws = scaffold_workspace();
+        write_lock(ws.path(), &[("app", "0.1.0"), ("dep", "0.1.0")]);
+        let shared_source = tempfile::tempdir().unwrap();
+        std::fs::create_dir(shared_source.path().join("src")).unwrap();
+        std::fs::write(shared_source.path().join("src/lib.rs"), "").unwrap();
+        let external_target = tempfile::tempdir().unwrap();
+        let out_dir = external_target.path().join("target/debug/deps");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        // Cargo's path_args falls back to the package cwd when a target's
+        // source, such as an explicit [[bin]].path, is outside the workspace.
+        let args = rustc_args_for_package_outside_workspace(shared_source.path(), &out_dir, None);
+        let intent = discover_with_context(Some(&args), Some(ws.path()), Some(ws.path()))
+            .expect("the package cwd still identifies the build workspace");
+        assert_eq!(
+            intent.lock_path.as_deref(),
+            Some(ws.path().join("Cargo.lock").to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn dependency_source_classification_does_not_depend_on_lint_capping() {
+        let ws = scaffold_workspace();
+        write_lock(ws.path(), &[("app", "0.1.0"), ("small-dep", "1.0.0")]);
+        let cargo_home = tempfile::tempdir().unwrap();
+        let package = registry_crate_with_own_lock(cargo_home.path());
+        let out_dir = ws.path().join("target/debug/deps");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        for extra in [vec![], vec!["--cap-lints", "allow"]] {
+            let initial = rustc_args_for_package_outside_workspace(&package, &out_dir, None);
+            let mut argv = vec!["rustc".to_owned()];
+            argv.extend(initial.all_args);
+            argv.extend(extra.into_iter().map(str::to_owned));
+            let args = RustcArgs::parse(&argv).unwrap();
+            let intent = discover_with_context(Some(&args), Some(&package), Some(&package))
+                .expect("a dependency uses the build lock even with verbose Cargo output");
+            assert_eq!(
+                intent.lock_path.as_deref(),
+                Some(ws.path().join("Cargo.lock").to_string_lossy().as_ref())
+            );
+        }
     }
 
     #[test]
