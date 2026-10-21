@@ -174,9 +174,17 @@ fn discover_workspace(
 /// A workspace package can also name a source outside the workspace; its cwd
 /// still identifies that package and must remain a discovery candidate.
 fn compiles_outside_workspace(args: &RustcArgs, cwd: Option<&Path>) -> bool {
-    args.source_file
-        .as_deref()
-        .is_some_and(|source| source.is_absolute() && cwd.is_none_or(|cwd| source.starts_with(cwd)))
+    args.source_file.as_deref().is_some_and(|source| {
+        source.is_absolute()
+            && cwd.is_none_or(|cwd| {
+                source.starts_with(cwd)
+                    || source
+                        .canonicalize()
+                        .ok()
+                        .zip(cwd.canonicalize().ok())
+                        .is_some_and(|(source, cwd)| source.starts_with(cwd))
+            })
+    })
 }
 
 fn crate_names_from_lock(lock_path: &Path) -> Option<Vec<String>> {
@@ -708,6 +716,25 @@ mod tests {
             Some(&package),
         );
         assert_eq!(result.err(), Some(DiscoveryFailure::NoWorkspace));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_registry_source_alias_does_not_restore_the_packages_bundled_lock() {
+        let ws = scaffold_workspace();
+        write_lock(ws.path(), &[("app", "0.1.0"), ("small-dep", "1.0.0")]);
+        let cargo_home = tempfile::tempdir().unwrap();
+        let package = registry_crate_with_own_lock(cargo_home.path());
+        let alias_dir = tempfile::tempdir().unwrap();
+        let alias = alias_dir.path().join("cargo-home");
+        std::os::unix::fs::symlink(cargo_home.path(), &alias).unwrap();
+        let alias_package = alias.join(package.strip_prefix(cargo_home.path()).unwrap());
+        let out_dir = ws.path().join("target/debug/deps");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let args = rustc_args_for_package_outside_workspace(&alias_package, &out_dir, None);
+        let physical_package = package.canonicalize().unwrap();
+        let lock = find_lock_path(Some(&args), Some(&alias_package), Some(&physical_package));
+        assert_eq!(lock, Some(ws.path().join("Cargo.lock")));
     }
 
     #[test]
