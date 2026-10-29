@@ -1692,8 +1692,12 @@ fn initialize_db(db: &Connection) -> rusqlite::Result<()> {
     // added or changed below. It cannot vouch for the memo rule columns
     // ([`crate::file_hash::has_rule_columns`]), so those are checked too.
     // Both checks only read.
+    //
+    // A higher generation is a newer release's stamp. Its schema holds every
+    // statement below (they only ever add), so the open skips them as on a
+    // current index and never stamps this release's lower number over it.
     let generation: i64 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if generation == INDEX_SCHEMA_GENERATION && crate::file_hash::has_rule_columns(db)? {
+    if generation >= INDEX_SCHEMA_GENERATION && crate::file_hash::has_rule_columns(db)? {
         return Ok(());
     }
 
@@ -1850,7 +1854,11 @@ fn initialize_db(db: &Connection) -> rusqlite::Result<()> {
         .execute_batch("ALTER TABLE target_roots ADD COLUMN discovered INTEGER NOT NULL DEFAULT 0");
 
     crate::file_hash::ensure_file_hash_cache_schema(db)?;
-    db.pragma_update(None, "user_version", INDEX_SCHEMA_GENERATION)?;
+    db.pragma_update(
+        None,
+        "user_version",
+        generation.max(INDEX_SCHEMA_GENERATION),
+    )?;
 
     Ok(())
 }
@@ -1881,6 +1889,12 @@ fn initialize_db(db: &Connection) -> rusqlite::Result<()> {
 ///    which joins it, failed there).
 /// 12: replace incompatible `record_json` prediction memos with the current
 ///    payload schema. Compiled cache entries are retained.
+///
+/// The stamp only goes up: a release that finds a higher number keeps it and
+/// skips the DDL. Two releases open one store while a build-script launcher
+/// still runs the kache that installed it, and a stamp set back down made the
+/// newer release run its DDL again on its next open. Releases from before
+/// this rule still stamp their own number back.
 const INDEX_SCHEMA_GENERATION: i64 = 12;
 
 /// Raise the refcount of every blob `cache_key` maps to at least the
