@@ -715,6 +715,79 @@ fn build_script_runs_are_restored_and_keyed_on_their_declarations() {
     assert!(results_for(&events_since(&fx.cache, mark), "build_script_run").is_empty());
 }
 
+/// `dep` is a build dependency and a normal dependency of `app`, so a release
+/// build runs its one build-script binary at `OPT_LEVEL=0` (`build-override`)
+/// and at `OPT_LEVEL=3`. The script declares a variable named after the
+/// level, the way the `cc` crate declares `CFLAGS_<target>`.
+fn write_two_configuration_workspace(root: &Path) {
+    let write = |relative: &str, content: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    };
+    write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"dep\", \"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        "dep/Cargo.toml",
+        "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write(
+        "dep/build.rs",
+        r#"fn main() {
+    let level = std::env::var("OPT_LEVEL").unwrap();
+    println!("cargo:rerun-if-env-changed=DEP_FLAGS_{level}");
+    println!("cargo:rustc-env=DEP_LEVEL={level}");
+}
+"#,
+    );
+    write(
+        "dep/src/lib.rs",
+        "pub fn level() -> &'static str { env!(\"DEP_LEVEL\") }\n",
+    );
+    write(
+        "app/Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [dependencies]\ndep = { path = \"../dep\" }\n\n\
+         [build-dependencies]\ndep = { path = \"../dep\" }\n",
+    );
+    write(
+        "app/build.rs",
+        "fn main() { println!(\"cargo:rustc-env=BUILD_LEVEL={}\", dep::level()); }\n",
+    );
+    write(
+        "app/src/main.rs",
+        "fn main() { println!(\"{} {}\", dep::level(), env!(\"BUILD_LEVEL\")); }\n",
+    );
+}
+
+/// One build-script binary that runs in two configurations keeps an input
+/// prediction for each, so a new target directory restores both runs.
+#[test]
+fn each_configuration_of_a_build_script_restores_its_own_run() {
+    let fx = fixture_from(write_two_configuration_workspace);
+    let build = |name: &str| {
+        let target = target(&fx, name);
+        let mark = event_count(&fx.cache);
+        run(cargo("build", &fx.workspace, &fx.home, &fx.cache, &target, &[]).arg("--release"));
+        let app = Command::new(target.join("release/app")).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&app.stdout), "3 0\n");
+        let mut runs: Vec<String> = events_since(&fx.cache, mark)
+            .iter()
+            .filter(|event| field(event, "crate_name") == "build_script_run")
+            .map(|event| format!("{} {}", field(event, "package"), field(event, "result")))
+            .collect();
+        runs.sort();
+        runs
+    };
+    assert_eq!(build("first"), ["app miss", "dep miss", "dep miss"]);
+    assert_eq!(
+        build("second"),
+        ["app local_hit", "dep local_hit", "dep local_hit"]
+    );
+}
+
 /// A package whose build script declares the package directory, writes
 /// `body` into it, and appends a line to `$SELFWRITER_RUNS` on every run.
 fn write_selfwriter(root: &Path, body: &str) {
