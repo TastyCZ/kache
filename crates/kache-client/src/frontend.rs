@@ -11,8 +11,9 @@ pub fn run(version: &str) -> Result<i32> {
     let started_at = std::time::Instant::now();
     let args = std::env::args_os().collect::<Vec<_>>();
     anyhow::ensure!(
-        args.get(1)
-            .is_none_or(|arg| arg != crate::FORWARDED_ARGV_FLAG),
+        args.get(1).is_none_or(|arg| {
+            arg != crate::FORWARDED_ARGV_FLAG && arg != crate::FORWARDED_ARGV_FILE_FLAG
+        }),
         "kache-engine points to the client; reinstall both Kache binaries together"
     );
     let executable = std::env::current_exe().context("locating the Kache client")?;
@@ -88,6 +89,9 @@ fn forward_engine(
     }
     #[cfg(not(unix))]
     {
+        #[cfg(windows)]
+        let status = windows::engine_status(&mut command)?;
+        #[cfg(not(windows))]
         let status = command.status().context("starting the Kache engine")?;
         Ok(status.code().unwrap_or(1))
     }

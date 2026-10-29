@@ -256,6 +256,7 @@ exclude_globs = [
     "src/fallback/macos.rs",
     "crates/kache-client/src/stdio_windows.rs",
     "crates/kache-client/src/frontend_windows.rs",
+    "crates/kache-client/src/argv_file_windows.rs",
     "crates/kache-ipc/src/windows_handles.rs",
     "crates/kache-ipc/src/windows_process.rs",
     "crates/kache-ipc/src/windows_msvc.rs",
